@@ -34,6 +34,7 @@ Run:
 import re
 from pathlib import Path
 from io import BytesIO
+from urllib.parse import quote
 
 import openpyxl
 from PIL import Image, ImageChops, ImageFilter, ImageOps
@@ -56,7 +57,15 @@ COVER_LOGO = IMAGE_FOLDER / "cover_logo.jpeg"
 # Cover-page contact links. Replace the placeholders with real details.
 # Leave a value empty ("") to hide that link.
 CONTACT_EMAIL = "auravyacrystals@gmail.com"
-CONTACT_WHATSAPP = "+917030155355"     # include country code
+# One or more WhatsApp numbers (include country code). Each number gets its
+# own clickable row that opens a chat with that number.
+CONTACT_WHATSAPP = [
+    "+917030155355",
+    "+919971828843"
+]
+# Message pre-filled in the WhatsApp chat (the user can edit it before sending).
+# Set to "" to open the chat without a message.
+CONTACT_WHATSAPP_MESSAGE = "I would like to enquire about this catalogue!"
 CONTACT_INSTAGRAM = "auravyacrystals"    # handle without @
 CONTACT_FACEBOOK = "auravyacrystals"     # page name from facebook.com/<page>
 
@@ -392,8 +401,21 @@ def contact_links():
     if CONTACT_EMAIL:
         links.append(("email", "Email", CONTACT_EMAIL, f"mailto:{CONTACT_EMAIL}"))
     if CONTACT_WHATSAPP:
-        digits = re.sub(r"\D", "", CONTACT_WHATSAPP)  # wa.me needs digits only
-        links.append(("whatsapp", "WhatsApp", CONTACT_WHATSAPP, f"https://wa.me/{digits}"))
+        # Accept a list, or a single string with numbers separated by commas.
+        numbers = CONTACT_WHATSAPP
+        if isinstance(numbers, str):
+            numbers = numbers.split(",")
+        # URL-encode the message (spaces -> %20, ! etc.) for the ?text= parameter.
+        text_param = (
+            f"?text={quote(CONTACT_WHATSAPP_MESSAGE, safe='')}"
+            if CONTACT_WHATSAPP_MESSAGE else ""
+        )
+        for number in numbers:
+            number = str(number).strip()
+            digits = re.sub(r"\D", "", number)  # wa.me needs digits only
+            if digits:
+                links.append(("whatsapp", "WhatsApp", number,
+                              f"https://wa.me/{digits}{text_param}"))
     if CONTACT_INSTAGRAM:
         handle = CONTACT_INSTAGRAM.lstrip("@")
         links.append(("instagram", "Instagram", f"@{handle}",
@@ -474,14 +496,18 @@ def draw_cover_page(pdf):
 
     # Contact rows: icon | label | value. Whole row is a clickable link.
     icon_r = 11
-    row_gap = 34
+    y -= 34
+    # Shrink row spacing if many contacts (e.g. several WhatsApp numbers) so
+    # the list never runs into the footer.
+    available = y - 45
+    row_gap = min(34, available / max(1, len(links) - 1)) if len(links) > 1 else 34
+    row_gap = max(row_gap, 2 * icon_r + 2)
     label_font, label_size = "Helvetica-Bold", 11
     text_font, text_size = "Helvetica", 11
     label_w = max(stringWidth(l, label_font, label_size) for _, l, _, _ in links)
     text_w = max(stringWidth(t, text_font, text_size) for _, _, t, _ in links)
     block_w = 2 * icon_r + 12 + label_w + 16 + text_w
     left = (PAGE_W - block_w) / 2
-    y -= 34
     for icon, label, text, url in links:
         cx = left + icon_r
         draw_icon(pdf, icon, cx, y + 4, icon_r)
