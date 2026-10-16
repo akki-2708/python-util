@@ -53,6 +53,10 @@ IMAGE_FOLDER = BASE_DIR / "images"
 OUTPUT_PDF = BASE_DIR / "output" / "product_catalog.pdf"
 
 COVER_LOGO = IMAGE_FOLDER / "cover_logo.jpeg"
+# Contact icons: logos in assets/logos named email.png, whatsapp.png,
+# instagram.png and facebook.png. If a file is missing, a built-in drawn
+# icon is used instead.
+LOGO_FOLDER = BASE_DIR / "assets" / "logos"
 
 # Cover-page contact links. Replace the placeholders with real details.
 # Leave a value empty ("") to hide that link.
@@ -427,38 +431,172 @@ def contact_links():
     return links
 
 
+def whatsapp_icon_image(px=256):
+    """WhatsApp-style icon (white phone in a speech bubble on the WhatsApp
+    green circle) drawn with Pillow. Returns a transparent RGBA image."""
+    import math
+    from PIL import ImageDraw
+
+    S = 4 * px  # draw 4x larger, then downscale for smooth edges
+    u = S / 100  # design on a 100 x 100 grid
+    im = Image.new("RGBA", (S, S), (0, 0, 0, 0))
+    d = ImageDraw.Draw(im)
+    white = (255, 255, 255, 255)
+    d.ellipse((0, 0, S - 1, S - 1), fill=(37, 211, 102, 255))  # #25D366
+
+    # Speech-bubble ring with a tail at the bottom-left.
+    c, r, t = 50 * u, 30 * u, 5.5 * u
+    d.ellipse((c - r, c - r, c + r, c + r), outline=white, width=round(t))
+    d.polygon([(25 * u, 68 * u), (20 * u, 82 * u), (35 * u, 77 * u)], fill=white)
+
+    # Handset: thick curve (overlapping discs) with rounded ear/mouth pieces.
+    cx, cy, rc, w = 54 * u, 46 * u, 11.5 * u, 3.4 * u
+    for i in range(61):
+        a = math.radians(95 + i * 80 / 60)
+        x, y = cx + rc * math.cos(a), cy + rc * math.sin(a)
+        d.ellipse((x - w, y - w, x + w, y + w), fill=white)
+
+    def blob(x, y, rx, ry, angle):
+        mask = Image.new("L", (S, S), 0)
+        ImageDraw.Draw(mask).ellipse((x - rx, y - ry, x + rx, y + ry), fill=255)
+        mask = mask.rotate(angle, center=(x, y), resample=Image.BICUBIC)
+        im.paste(white, (0, 0), mask)
+
+    blob(cx - rc - 0.8 * u, cy - 4.5 * u, 4.6 * u, 6.2 * u, -15)  # earpiece
+    blob(cx + 4.5 * u, cy + rc + 0.8 * u, 6.2 * u, 4.6 * u, -15)  # mouthpiece
+    return im.resize((px, px), Image.LANCZOS)
+
+
+_icon_cache = {}
+
+
+def _icon_canvas(px):
+    """Supersampled transparent canvas: returns (size, unit, image) where
+    unit is 1/100 of the size, so shapes are designed on a 100 x 100 grid."""
+    S = 4 * px
+    return S, S / 100, Image.new("RGBA", (S, S), (0, 0, 0, 0))
+
+
+def gmail_icon_image(px=256):
+    """Gmail-style multicolour 'M' envelope on a white circle."""
+    from PIL import ImageDraw
+
+    S, u, im = _icon_canvas(px)
+    d = ImageDraw.Draw(im)
+    d.ellipse((0, 0, S - 1, S - 1), fill=(255, 255, 255, 255),
+              outline=(218, 220, 224, 255), width=round(1.5 * u))
+
+    def pts(points):
+        return [(x * u, y * u) for x, y in points]
+
+    blue, green, red = (66, 133, 244, 255), (52, 168, 83, 255), (234, 67, 53, 255)
+    yellow, dark_red = (251, 188, 4, 255), (197, 34, 31, 255)
+    # Side stems (rounded on the outer bottom corner).
+    d.rounded_rectangle(pts([(19, 33), (31, 72)]), radius=3 * u, fill=blue)
+    d.rectangle(pts([(25, 33), (31, 72)]), fill=blue)
+    d.rounded_rectangle(pts([(69, 33), (81, 72)]), radius=3 * u, fill=green)
+    d.rectangle(pts([(69, 33), (75, 72)]), fill=green)
+    # Red 'V' of the envelope flap, then the coloured top corners.
+    d.polygon(pts([(19, 33), (50, 56), (81, 33), (81, 46), (50, 69), (19, 46)]), fill=red)
+    d.polygon(pts([(19, 33), (31, 41.9), (31, 54.9), (19, 46)]), fill=dark_red)
+    d.polygon(pts([(81, 33), (69, 41.9), (69, 54.9), (81, 46)]), fill=yellow)
+    d.ellipse(pts([(19, 27), (31, 39)]), fill=dark_red)
+    d.ellipse(pts([(69, 27), (81, 39)]), fill=yellow)
+    return im.resize((px, px), Image.LANCZOS)
+
+
+def instagram_icon_image(px=256):
+    """Instagram-style camera outline on the yellow-orange-pink-purple gradient."""
+    from PIL import ImageDraw
+
+    S, u, im = _icon_canvas(px)
+    stops = [(0.0, (254, 218, 117)), (0.25, (250, 126, 30)), (0.5, (214, 41, 118)),
+             (0.75, (150, 47, 191)), (1.0, (79, 91, 213))]
+
+    def colour(t):
+        for (t0, c0), (t1, c1) in zip(stops, stops[1:]):
+            if t <= t1:
+                f = (t - t0) / (t1 - t0)
+                return tuple(round(a + (b - a) * f) for a, b in zip(c0, c1)) + (255,)
+        return stops[-1][1] + (255,)
+
+    # Radial gradient from the bottom-left corner; built small, then upscaled.
+    n = 64
+    small = Image.new("RGBA", (n, n))
+    for y in range(n):
+        for x in range(n):
+            dx, dy = x / (n - 1) - 0.1, (n - 1 - y) / (n - 1) + 0.1
+            small.putpixel((x, y), colour(min(1, (dx * dx + dy * dy) ** 0.5 / 1.3)))
+    gradient = small.resize((S, S), Image.BICUBIC)
+    mask = Image.new("L", (S, S), 0)
+    ImageDraw.Draw(mask).rounded_rectangle((0, 0, S - 1, S - 1), radius=26 * u, fill=255)
+    im.paste(gradient, (0, 0), mask)
+
+    d = ImageDraw.Draw(im)
+    white = (255, 255, 255, 255)
+    d.rounded_rectangle((21 * u, 21 * u, 79 * u, 79 * u), radius=17 * u,
+                        outline=white, width=round(6.5 * u))
+    d.ellipse((36 * u, 36 * u, 64 * u, 64 * u), outline=white, width=round(6.5 * u))
+    d.ellipse((63 * u, 29 * u, 71 * u, 37 * u), fill=white)
+    return im.resize((px, px), Image.LANCZOS)
+
+
+def facebook_icon_image(px=256):
+    """Facebook-style white 'f' on the Facebook blue circle."""
+    from PIL import ImageDraw
+
+    S, u, im = _icon_canvas(px)
+    circle = Image.new("L", (S, S), 0)
+    ImageDraw.Draw(circle).ellipse((0, 0, S - 1, S - 1), fill=255)
+    im.paste((24, 119, 242, 255), (0, 0), circle)  # #1877F2
+
+    f = Image.new("L", (S, S), 0)
+    d = ImageDraw.Draw(f)
+    d.rectangle((43 * u, 42 * u, 57 * u, 101 * u), fill=255)  # stem
+    d.rectangle((33 * u, 50 * u, 67 * u, 62 * u), fill=255)   # crossbar
+    # Curved top: a quarter ring (top-left quadrant of an ellipse ring).
+    hook = Image.new("L", (S, S), 0)
+    h = ImageDraw.Draw(hook)
+    h.ellipse((43 * u, 18 * u, 89 * u, 66 * u), fill=255)
+    h.ellipse((57 * u, 31 * u, 77 * u, 53 * u), fill=0)
+    h.rectangle((66 * u, 18 * u, 100 * u, 100 * u), fill=0)
+    h.rectangle((0, 42 * u, 100 * u, 100 * u), fill=0)
+    f.paste(255, (0, 0), hook)
+    d.rectangle((66 * u, 18 * u, 69 * u, 31 * u), fill=255)  # flat end of the hook
+    # The stem runs off the bottom of the circle, as in the real logo.
+    f = Image.composite(f, Image.new("L", (S, S), 0), circle)
+    im.paste((255, 255, 255, 255), (0, 0), f)
+    return im.resize((px, px), Image.LANCZOS)
+
+
+ICON_BUILDERS = {
+    "email": gmail_icon_image,
+    "whatsapp": whatsapp_icon_image,
+    "instagram": instagram_icon_image,
+    "facebook": facebook_icon_image,
+}
+
+
+def icon_reader(kind):
+    """Use assets/logos/<kind>.png if present, otherwise the generated
+    icon. Cached so each icon is loaded only once."""
+    if kind not in _icon_cache:
+        logo = LOGO_FOLDER / f"{kind}.png"
+        if logo.is_file():
+            _icon_cache[kind] = ImageReader(str(logo))
+        else:
+            print(f"Logo not found, using built-in icon: {logo}")
+            buffer = BytesIO()
+            ICON_BUILDERS[kind]().save(buffer, format="PNG")
+            buffer.seek(0)
+            _icon_cache[kind] = ImageReader(buffer)
+    return _icon_cache[kind]
+
+
 def draw_icon(pdf, kind, cx, cy, r):
-    """Simple vector icon inside a gold circle of radius r centred at (cx, cy)."""
-    pdf.setFillColor(GOLD)
-    pdf.circle(cx, cy, r, stroke=0, fill=1)
-    pdf.setStrokeColor(colors.white)
-    pdf.setFillColor(colors.white)
-    pdf.setLineWidth(1.1)
-    s = r * 0.5
-    if kind == "email":
-        pdf.rect(cx - s, cy - s * 0.7, 2 * s, 1.4 * s, stroke=1, fill=0)
-        path = pdf.beginPath()
-        path.moveTo(cx - s, cy + s * 0.7)
-        path.lineTo(cx, cy - s * 0.05)
-        path.lineTo(cx + s, cy + s * 0.7)
-        pdf.drawPath(path, stroke=1, fill=0)
-    elif kind == "whatsapp":
-        # Speech bubble with a tail and a small handset dot pattern.
-        pdf.circle(cx, cy + s * 0.05, s, stroke=1, fill=0)
-        path = pdf.beginPath()
-        path.moveTo(cx - s * 0.75, cy - s * 0.6)
-        path.lineTo(cx - s * 1.05, cy - s * 1.05)
-        path.lineTo(cx - s * 0.3, cy - s * 0.9)
-        pdf.drawPath(path, stroke=1, fill=0)
-        pdf.setFont("Helvetica-Bold", r * 0.75)
-        pdf.drawCentredString(cx, cy - r * 0.22, "W")
-    elif kind == "instagram":
-        pdf.roundRect(cx - s, cy - s, 2 * s, 2 * s, s * 0.55, stroke=1, fill=0)
-        pdf.circle(cx, cy, s * 0.45, stroke=1, fill=0)
-        pdf.circle(cx + s * 0.55, cy + s * 0.55, s * 0.1, stroke=0, fill=1)
-    elif kind == "facebook":
-        pdf.setFont("Helvetica-Bold", r * 1.25)
-        pdf.drawCentredString(cx + r * 0.05, cy - r * 0.43, "f")
+    """Brand-style icon of radius r centred at (cx, cy)."""
+    pdf.drawImage(icon_reader(kind), cx - r, cy - r,
+                  width=2 * r, height=2 * r, mask="auto")
 
 
 def draw_cover_page(pdf):
