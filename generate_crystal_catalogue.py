@@ -337,17 +337,20 @@ def draw_card(pdf, product, image_path, x, y):
     pdf.setLineWidth(0.7)
     pdf.roundRect(x, image_y, IMAGE_W, IMAGE_H, 9, stroke=1, fill=0)
 
-    # ID badge at top-left of image
+    # ID badge at top-left of image (compact: sized to fit the text)
     badge_text = product["id"]
-    badge_w = max(42, stringWidth(badge_text, "Helvetica-Bold", 7.5) + 10)
-    badge_h = 15
-    badge_x = x + 5
-    badge_y = image_y + IMAGE_H - badge_h - 5
+    badge_font, badge_size = "Helvetica-Bold", 5.5
+    badge_pad_x = 3
+    badge_w = stringWidth(badge_text, badge_font, badge_size) + 2 * badge_pad_x
+    badge_h = 9
+    badge_x = x + 4
+    badge_y = image_y + IMAGE_H - badge_h - 4
     pdf.setFillColor(colors.HexColor("#FFFDF8"))
-    pdf.roundRect(badge_x, badge_y, badge_w, badge_h, 3, stroke=0, fill=1)
+    pdf.roundRect(badge_x, badge_y, badge_w, badge_h, 2, stroke=0, fill=1)
     pdf.setFillColor(DARK_GOLD)
-    pdf.setFont("Helvetica-Bold", 7.5)
-    pdf.drawString(badge_x + 4, badge_y + 4.2, badge_text)
+    pdf.setFont(badge_font, badge_size)
+    # Vertically centre the text (cap height of Helvetica is ~0.72 em).
+    pdf.drawString(badge_x + badge_pad_x, badge_y + (badge_h - badge_size * 0.72) / 2, badge_text)
 
     # Name wraps below image; cost is right-aligned on the first label line.
     label_top = y + LABEL_H - 10
