@@ -30,7 +30,7 @@ from pathlib import Path
 from io import BytesIO
 
 import openpyxl
-from PIL import Image, ImageOps
+from PIL import Image, ImageChops, ImageFilter, ImageOps
 from reportlab.pdfgen import canvas
 from reportlab.lib.pagesizes import A4
 from reportlab.lib import colors
@@ -73,6 +73,10 @@ CARD_H = (GRID_TOP - GRID_BOTTOM - (ROWS - 1) * GAP_Y) / ROWS
 IMAGE_H = CARD_H * 0.76
 LABEL_H = CARD_H - IMAGE_H
 IMAGE_W = CARD_W
+# Foreground photo size relative to "fit fully inside" (1.0 = no crop).
+# Values > 1.0 enlarge the sharp photo; any overflow (usually top/bottom of
+# portrait photos) is trimmed evenly at the placeholder edge.
+FOREGROUND_SCALE = 1.3
 
 # Start the next category on the same page if at least this fraction of the
 # grid area is still free; otherwise it starts on a new page.
@@ -213,9 +217,31 @@ def wrap_text(text, font, size, max_width):
     return lines
 
 
+def autotrim(im, tolerance=20, pad=0.03):
+    """Remove uniform-colour borders around the product so it is drawn larger.
+    The corner pixel is taken as the background colour; a small padding is
+    kept so the product does not touch the placeholder edge."""
+    bg = Image.new(im.mode, im.size, im.getpixel((0, 0)))
+    diff = ImageChops.difference(im, bg).convert("L")
+    mask = diff.point(lambda p: 255 if p > tolerance else 0)
+    box = mask.getbbox()
+    if not box:
+        return im
+    left, top, right, bottom = box
+    px, py = int((right - left) * pad), int((bottom - top) * pad)
+    return im.crop((
+        max(0, left - px),
+        max(0, top - py),
+        min(im.width, right + px),
+        min(im.height, bottom + py),
+    ))
+
+
 def draw_image_fit(pdf, path, x, y, width, height, dpi=300):
-    """Fit the whole image inside the placeholder, centred, keeping its
-    aspect ratio (no cropping, no zoom). Leftover space shows IMAGE_BG."""
+    """Fill the placeholder without cropping the product:
+    1. trim plain borders around the product,
+    2. draw a blurred, cover-scaled copy as the background,
+    3. paste the full (contain-scaled) image centred on top."""
     with Image.open(path) as im:
         im = ImageOps.exif_transpose(im)  # honour phone-camera rotation
         if im.mode in ("RGBA", "LA", "P"):
@@ -228,25 +254,29 @@ def draw_image_fit(pdf, path, x, y, width, height, dpi=300):
         else:
             im = im.convert("RGB")
 
+        im = autotrim(im)
         iw, ih = im.size
-        scale = min(width / iw, height / ih)
-        draw_w, draw_h = iw * scale, ih * scale
 
-        # Downscale only (never upscale) to print resolution to limit PDF size.
-        target = (round(draw_w / 72 * dpi), round(draw_h / 72 * dpi))
-        if im.width > target[0]:
-            im = im.resize(target, Image.LANCZOS)
+        # Canvas at print resolution with the placeholder's aspect ratio.
+        cw = max(1, round(width / 72 * dpi))
+        ch = max(1, round(height / 72 * dpi))
+
+        # Background: cover-scale + blur (cropping is fine, it is only backdrop).
+        backdrop = ImageOps.fit(im, (cw, ch), Image.LANCZOS)
+        backdrop = backdrop.filter(ImageFilter.GaussianBlur(radius=max(4, cw // 25)))
+
+        # Foreground: contain-scale x FOREGROUND_SCALE, centred.
+        # Never wider than the placeholder; overflow is clipped by paste().
+        scale = min(min(cw / iw, ch / ih) * FOREGROUND_SCALE, cw / iw)
+        fg = im.resize(
+            (max(1, round(iw * scale)), max(1, round(ih * scale))), Image.LANCZOS
+        )
+        backdrop.paste(fg, ((cw - fg.width) // 2, (ch - fg.height) // 2))
 
         buffer = BytesIO()
-        im.save(buffer, format="JPEG", quality=95)
+        backdrop.save(buffer, format="JPEG", quality=92)
     buffer.seek(0)
-    pdf.drawImage(
-        ImageReader(buffer),
-        x + (width - draw_w) / 2,
-        y + (height - draw_h) / 2,
-        width=draw_w,
-        height=draw_h,
-    )
+    pdf.drawImage(ImageReader(buffer), x, y, width=width, height=height)
 
 
 def draw_card(pdf, product, image_path, x, y):
