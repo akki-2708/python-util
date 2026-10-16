@@ -46,6 +46,8 @@ from reportlab.pdfbase.pdfmetrics import stringWidth
 from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.ttfonts import TTFont
 
+import watermark
+
 # ------------------------- CONFIGURATION -------------------------
 BASE_DIR = Path(__file__).resolve().parent
 EXCEL_FILE = BASE_DIR / "products.xlsx"
@@ -57,6 +59,15 @@ COVER_LOGO = IMAGE_FOLDER / "cover_logo.jpeg"
 # instagram.png and facebook.png. If a file is missing, a built-in drawn
 # icon is used instead.
 LOGO_FOLDER = BASE_DIR / "assets" / "logos"
+
+# Watermark drawn on product images in the PDF only; the original files in
+# the images folder are never changed.
+# WATERMARK_IDS = None applies it to every product; set it to e.g. {"BR0001"}
+# to watermark only those IDs, or WATERMARK_TEXT = "" to turn it off.
+WATERMARK_TEXT = "auravyacrystals"
+WATERMARK_IDS = None
+WATERMARK_OPACITY = 90  # 0 (invisible) - 255 (solid)
+# Watermark drawing (font, angle, style) lives in watermark.py.
 
 # Cover-page contact links. Replace the placeholders with real details.
 # Leave a value empty ("") to hide that link.
@@ -278,7 +289,12 @@ def autotrim(im, tolerance=20, pad=0.03):
     ))
 
 
-def draw_image_fit(pdf, path, x, y, width, height, dpi=300):
+def apply_watermark(im, text):
+    """Same watermark as watermark.py (shared code), returned as RGB."""
+    return watermark.apply_watermark(im, text, WATERMARK_OPACITY).convert("RGB")
+
+
+def draw_image_fit(pdf, path, x, y, width, height, dpi=300, watermark=None):
     """Fill the placeholder without cropping the product:
     1. trim plain borders around the product,
     2. draw a blurred, cover-scaled copy as the background,
@@ -314,6 +330,9 @@ def draw_image_fit(pdf, path, x, y, width, height, dpi=300):
         )
         backdrop.paste(fg, ((cw - fg.width) // 2, (ch - fg.height) // 2))
 
+        if watermark:
+            backdrop = apply_watermark(backdrop, watermark)
+
         buffer = BytesIO()
         backdrop.save(buffer, format="JPEG", quality=92)
     buffer.seek(0)
@@ -329,7 +348,10 @@ def draw_card(pdf, product, image_path, x, y):
     clip = pdf.beginPath()
     clip.roundRect(x, image_y, IMAGE_W, IMAGE_H, 9)
     pdf.clipPath(clip, stroke=0, fill=0)
-    draw_image_fit(pdf, image_path, x + 2, image_y + 2, IMAGE_W - 4, IMAGE_H - 4)
+    use_watermark = WATERMARK_TEXT and (WATERMARK_IDS is None or product["id"] in WATERMARK_IDS)
+    watermark = WATERMARK_TEXT if use_watermark else None
+    draw_image_fit(pdf, image_path, x + 2, image_y + 2, IMAGE_W - 4, IMAGE_H - 4,
+                   watermark=watermark)
     pdf.restoreState()
 
     # Thin outline around image
