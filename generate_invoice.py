@@ -7,7 +7,8 @@ Layout:
      "INVOICE" title centred between rows 2 and 3
   3. Customer name (left), Bill number (right, below the date)
   4. Item table: image | ID | name | qty | price per unit | amount
-  5. Totals: total quantity and grand total
+  5. Totals: total quantity and grand total. If a discount is given:
+     Subtotal, Discount, then the Total after discount.
 
 Order items can be passed on the command line or in an Excel file.
 
@@ -20,6 +21,9 @@ Excel (see orders/sample_order.xlsx):
     --customer is given; --customer wins when both are present).
   - A header row with ID | Qty | Price, followed by one row per item.
     An optional "Name" column overrides the product name for that row.
+  - Optional discount row: "Discount" in column A and in column B either a
+    percentage (10% or a %-formatted cell) or a flat amount (500 / ₹500).
+    Leave it out, empty or 0 for no discount. --discount overrides it.
 
 Product names come from products.xlsx (all sheets) by ID; product images are
 taken from social_watermarked/<ID>.<ext>. Missing images show a placeholder.
@@ -74,6 +78,7 @@ QTY_HEADERS = {"qty", "quantity"}
 PRICE_HEADERS = {"price", "unit price", "price per unit", "rate"}
 NAME_HEADERS = {"name", "item name", "product name"}
 CUSTOMER_LABELS = {"customer", "customer name"}
+DISCOUNT_LABELS = {"discount", "discount %", "discount amount"}
 
 # Page layout
 PAGE_W, PAGE_H = A4
@@ -150,6 +155,40 @@ def parse_price(value, where):
     return price
 
 
+def parse_discount(value, where, number_format=None):
+    """Parse a discount into ("percent", Decimal) or ("amount", Decimal).
+
+    Accepted: "10%", "10 %", a cell formatted as percentage in Excel (0.1
+    shown as 10%), or a flat amount like 500 / "₹500" / "Rs. 500".
+    Empty or 0 means no discount (returns None).
+    """
+    if value is None or str(value).strip() == "":
+        return None
+    text = str(value).strip()
+    if text.endswith("%"):
+        kind, number = "percent", text[:-1].strip()
+    elif number_format and "%" in str(number_format) and isinstance(value, (int, float)):
+        # Excel stores 10% as 0.1 when the cell has a percentage format.
+        kind, number = "percent", str(Decimal(str(value)) * 100)
+    else:
+        kind, number = "amount", text
+    if kind == "amount":
+        try:
+            amount = parse_price(number, where)  # handles ₹ / Rs. / commas
+        except OrderError:
+            raise OrderError(f"{where}: discount '{value}' is not a number or percentage")
+    else:
+        try:
+            amount = Decimal(number)
+        except InvalidOperation:
+            raise OrderError(f"{where}: discount '{value}' is not a number")
+    if amount < 0:
+        raise OrderError(f"{where}: discount cannot be negative (got {value})")
+    if kind == "percent" and amount > 100:
+        raise OrderError(f"{where}: discount cannot be more than 100% (got {value})")
+    return (kind, amount.normalize()) if amount else None
+
+
 def items_from_args(item_args):
     """Parse --item ID:QTY:PRICE values."""
     items = []
@@ -167,22 +206,36 @@ def items_from_args(item_args):
 
 
 def order_from_excel(path):
-    """Read (customer, items) from the first sheet of an order Excel file."""
+    """Read (customer, items, discount) from the first sheet of an order
+    Excel file. The Customer and Discount rows can be anywhere on the sheet."""
     if not path.is_file():
         raise OrderError(f"Order Excel not found: {path}")
     wb = openpyxl.load_workbook(path, data_only=True, read_only=True)
     try:
         ws = wb.worksheets[0]
-        customer, header, items = None, None, []
-        for row_no, row in enumerate(ws.iter_rows(values_only=True), start=1):
+        customer, discount, header, items = None, None, None, []
+        for row_no, cells_row in enumerate(ws.iter_rows(), start=1):
+            row = [c.value for c in cells_row]
             cells = ["" if v is None else str(v).strip() for v in row]
             if not any(cells):
                 continue
+            label = cells[0].lower().rstrip(":").strip()
+
+            # Label rows: "Customer | name" and "Discount | 10% or 500".
+            if label in CUSTOMER_LABELS:
+                customer = next((c for c in cells[1:] if c), None)
+                continue
+            if label in DISCOUNT_LABELS:
+                index = next((i for i in range(1, len(row)) if cells[i]), None)
+                if index is not None:
+                    discount = parse_discount(
+                        row[index], f"{path.name} row {row_no} (Discount)",
+                        getattr(cells_row[index], "number_format", None),
+                    )
+                continue
+
             if header is None:
                 lowered = [c.lower().rstrip(":") for c in cells]
-                if lowered[0] in CUSTOMER_LABELS:
-                    customer = next((c for c in cells[1:] if c), None)
-                    continue
 
                 def find(names):
                     return next((i for i, c in enumerate(lowered) if c in names), None)
@@ -210,7 +263,7 @@ def order_from_excel(path):
             })
         if header is None:
             raise OrderError(f"{path.name}: no header row with ID, Qty and Price columns found")
-        return customer, items
+        return customer, items, discount
     finally:
         wb.close()
 
@@ -408,10 +461,43 @@ def draw_item_row(pdf, y, index, item):
     return y
 
 
-def draw_totals(pdf, y, total_qty, grand_total):
+TOTAL_ROW_H = 28     # final "Total" row
+SUMMARY_ROW_H = 20   # "Subtotal" / "Discount" rows (only when a discount is given)
+
+
+def totals_height(has_discount):
+    return TOTAL_ROW_H + (2 * SUMMARY_ROW_H if has_discount else 0)
+
+
+def discount_label(discount):
+    kind, value = discount
+    if kind == "percent":
+        return f"Discount ({value:f}%)"
+    return "Discount"
+
+
+def draw_totals(pdf, y, total_qty, subtotal, discount=None, discount_amount=Decimal(0)):
+    """Totals block. With a discount: Subtotal, Discount and the final Total
+    (after discount); without: just the Total row."""
     widths = [w for _, w, _ in COLUMNS]
     xs = [MARGIN + sum(widths[:i]) for i in range(len(widths))]
-    h = 28
+    amount_x, amount_w = xs[4], widths[4] + widths[5]
+
+    if discount:
+        for label, value in (("Subtotal", money(subtotal)),
+                             (discount_label(discount), "- " + money(discount_amount))):
+            y -= SUMMARY_ROW_H
+            text_y = y + SUMMARY_ROW_H / 2 - 3.5
+            pdf.setFillColor(TEXT_COLOR)
+            draw_text(pdf, label, xs[1], text_y, widths[1] + widths[2], "left", FONT, 10)
+            if label == "Subtotal":
+                draw_text(pdf, str(total_qty), xs[3], text_y, widths[3], "right", FONT, 10)
+            draw_text(pdf, value, amount_x, text_y, amount_w, "right", FONT, 10)
+            pdf.setStrokeColor(LINE)
+            pdf.setLineWidth(0.5)
+            pdf.line(MARGIN, y, PAGE_W - MARGIN, y)
+
+    h = TOTAL_ROW_H
     y -= h
     pdf.setFillColor(colors.HexColor("#F5EEDD"))
     pdf.rect(MARGIN, y, CONTENT_W, h, stroke=0, fill=1)
@@ -424,7 +510,8 @@ def draw_totals(pdf, y, total_qty, grand_total):
     pdf.setFillColor(DARK_GOLD)
     draw_text(pdf, "Total", xs[1], text_y, widths[1] + widths[2], "left", FONT_BOLD, 11)
     draw_text(pdf, str(total_qty), xs[3], text_y, widths[3], "right", FONT_BOLD, 11)
-    draw_text(pdf, money(grand_total), xs[4], text_y, widths[4] + widths[5], "right", FONT_BOLD, 11)
+    draw_text(pdf, money(subtotal - discount_amount), amount_x, text_y, amount_w,
+              "right", FONT_BOLD, 11)
     return y
 
 
@@ -436,9 +523,9 @@ def draw_footer(pdf, page, pages):
         pdf.drawRightString(PAGE_W - MARGIN, 30, f"Page {page} of {pages}")
 
 
-def paginate(items, first_table_top, next_table_top):
-    """Split items into pages; the last page must also fit the totals row."""
-    totals_h = 28 + 10
+def paginate(items, first_table_top, next_table_top, totals_h=TOTAL_ROW_H):
+    """Split items into pages; the last page must also fit the totals block."""
+    totals_h = totals_h + 10
     pages, current = [], []
     top = first_table_top - HEADER_ROW_H
     y = top
@@ -456,7 +543,8 @@ def paginate(items, first_table_top, next_table_top):
     return [p for p in pages if p] or [[]]
 
 
-def build_invoice(customer, items, output=None, bill_date=None):
+def build_invoice(customer, items, output=None, bill_date=None, discount=None):
+    """discount: None, ("percent", Decimal) or ("amount", Decimal)."""
     if not customer or not customer.strip():
         raise OrderError("Customer name is required (use --customer or a 'Customer' row in Excel)")
     if not items:
@@ -472,7 +560,17 @@ def build_invoice(customer, items, output=None, bill_date=None):
         item["amount"] = item["price"] * item["qty"]
         item["image"] = find_image(item["id"])
     total_qty = sum(i["qty"] for i in items)
-    grand_total = sum((i["amount"] for i in items), Decimal(0))
+    subtotal = sum((i["amount"] for i in items), Decimal(0))
+
+    discount_amount = Decimal(0)
+    if discount:
+        kind, value = discount
+        discount_amount = subtotal * value / 100 if kind == "percent" else value
+        discount_amount = discount_amount.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+        if discount_amount > subtotal:
+            raise OrderError(f"Discount {money(discount_amount).replace(RUPEE, 'Rs. ')} is more "
+                             f"than the bill subtotal {money(subtotal).replace(RUPEE, 'Rs. ')}")
+    grand_total = subtotal - discount_amount
 
     bill_date = bill_date or date.today()
     bill_no, counter, year, number = next_bill_number(bill_date)
@@ -486,7 +584,7 @@ def build_invoice(customer, items, output=None, bill_date=None):
     # Measure header height once to know where the table starts.
     first_top = PAGE_H - MARGIN - 78 - 8 - 22 - 20 - 16
     next_top = PAGE_H - MARGIN - 78 - 8 - 22
-    pages = paginate(items, first_top, next_top)
+    pages = paginate(items, first_top, next_top, totals_height(bool(discount)))
 
     row_index = 0
     for page_no, page_items in enumerate(pages, start=1):
@@ -503,7 +601,7 @@ def build_invoice(customer, items, output=None, bill_date=None):
             y = draw_item_row(pdf, y, row_index, item)
             row_index += 1
         if page_no == len(pages):
-            draw_totals(pdf, y, total_qty, grand_total)
+            draw_totals(pdf, y, total_qty, subtotal, discount, discount_amount)
         draw_footer(pdf, page_no, len(pages))
         pdf.showPage()
     pdf.save()
@@ -514,6 +612,9 @@ def build_invoice(customer, items, output=None, bill_date=None):
     print(f"Bill No: {bill_no} | Date: {bill_date.strftime(DATE_FORMAT)} | Customer: {customer.strip()}")
     print(f"Items: {len(items)} | Total qty: {total_qty} | Grand total: "
           f"{money(grand_total).replace(RUPEE, 'Rs. ')}")
+    if discount:
+        print(f"Subtotal: {money(subtotal).replace(RUPEE, 'Rs. ')} | {discount_label(discount)}: "
+              f"- {money(discount_amount).replace(RUPEE, 'Rs. ')}")
     if unknown:
         print(f"Warning - IDs not found in {PRODUCTS_FILE.name} (no name): {unknown}")
     if missing_images:
@@ -531,17 +632,21 @@ def main():
                         help="ordered item, repeat for each item, e.g. --item BR0001:2:450")
     parser.add_argument("--excel", type=Path, help="order Excel file (Customer row + ID/Qty/Price table)")
     parser.add_argument("--output", type=Path, help="PDF path (default: output/invoices/<bill no>.pdf)")
+    parser.add_argument("--discount", help="discount as percent (10%%) or amount (500); "
+                                           "overrides the Excel Discount row")
     args = parser.parse_args()
 
     if not args.item and not args.excel:
         parser.error("give order items with --item or --excel")
     try:
-        customer, items = args.customer, []
+        customer, items, discount = args.customer, [], None
         if args.excel:
-            excel_customer, items = order_from_excel(args.excel)
+            excel_customer, items, discount = order_from_excel(args.excel)
             customer = customer or excel_customer
         items += items_from_args(args.item)
-        build_invoice(customer, items, args.output)
+        if args.discount is not None:
+            discount = parse_discount(args.discount, "--discount")
+        build_invoice(customer, items, args.output, discount=discount)
     except OrderError as exc:
         sys.exit(f"Error: {exc}")
     except PermissionError as exc:

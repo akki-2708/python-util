@@ -13,4 +13,4 @@ py -m pip install openpyxl pillow reportlab
 py watermark.py
 
 # To generate invoices.
-py generate_invoice.py --excel orders/sample_order.xlsx
+py generate_invoice.py --excel orders/sample_order.xlsx --discount 5%
