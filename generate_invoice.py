@@ -6,7 +6,7 @@ Layout:
   2. Date (right)
      "INVOICE" title centred between rows 2 and 3
   3. Customer name (left), Bill number (right, below the date)
-  4. Item table: image | ID | name | qty | price per unit | amount
+  4. Item table: S.No. | image | ID | name | qty | price per unit | amount
   5. Totals: total quantity and grand total. If a discount is given:
      Subtotal, Discount, then the Total after discount.
 
@@ -19,14 +19,17 @@ Excel (see orders/sample_order.xlsx):
   py generate_invoice.py --excel orders/sample_order.xlsx
   - A row with "Customer" in column A and the name in column B (optional if
     --customer is given; --customer wins when both are present).
-  - A header row with ID | Qty | Price, followed by one row per item.
-    An optional "Name" column overrides the product name for that row.
+  - A header row with ID | Qty | Price (or Cost), followed by one row per item.
+    An optional "Name" column gives the item name on the bill; it is needed
+    for items that are not in products.xlsx (e.g. new or custom items).
   - Optional discount row: "Discount" in column A and in column B either a
     percentage (10% or a %-formatted cell) or a flat amount (500 / ₹500).
     Leave it out, empty or 0 for no discount. --discount overrides it.
 
-Product names come from products.xlsx (all sheets) by ID; product images are
-taken from social_watermarked/<ID>.<ext>. Missing images show a placeholder.
+Item name: the Excel "Name" column if filled, otherwise the name from
+products.xlsx (all sheets) by ID. ID, qty and price always come from the
+order. Images are taken from social_watermarked/<ID>.<ext>; items without an
+image are listed without one (no placeholder), in the same table format.
 
 Bill numbers look like AC-2026-0001 and continue from the last number used,
 stored in output/invoices/bill_counter.json (restarts at 0001 each year).
@@ -75,7 +78,7 @@ IMAGE_EXTENSIONS = (".jpeg", ".jpg", ".png", ".webp")
 # Excel header names (matched case-insensitively).
 ID_HEADERS = {"id", "item id", "product id"}
 QTY_HEADERS = {"qty", "quantity"}
-PRICE_HEADERS = {"price", "unit price", "price per unit", "rate"}
+PRICE_HEADERS = {"price", "unit price", "price per unit", "rate", "cost"}
 NAME_HEADERS = {"name", "item name", "product name"}
 CUSTOMER_LABELS = {"customer", "customer name"}
 DISCOUNT_LABELS = {"discount", "discount %", "discount amount"}
@@ -89,17 +92,24 @@ THUMB = 38          # thumbnail size (points)
 HEADER_ROW_H = 22   # table header height
 BOTTOM_LIMIT = 70   # keep this much space free at the bottom of each page
 
-# Table columns: (title, width, alignment). Name takes the remaining width.
+# Table columns: (key, title, width, alignment). Name takes the remaining width.
 COLUMNS = [
-    ("", 50, "center"),          # image
-    ("Item ID", 62, "left"),
-    ("Item Name", None, "left"),
-    ("Qty", 40, "right"),
-    ("Price / Unit", 80, "right"),
-    ("Amount", 88, "right"),
+    ("sno", "S.No.", 34, "center"),
+    ("image", "", 50, "center"),
+    ("id", "Item ID", 62, "left"),
+    ("name", "Item Name", None, "left"),
+    ("qty", "Qty", 40, "right"),
+    ("price", "Price / Unit", 80, "right"),
+    ("amount", "Amount", 88, "right"),
 ]
-_fixed = sum(w for _, w, _ in COLUMNS if w)
-COLUMNS = [(t, w if w else CONTENT_W - _fixed, a) for t, w, a in COLUMNS]
+_fixed = sum(w for _, _, w, _ in COLUMNS if w)
+COLUMNS = [(k, t, w if w else CONTENT_W - _fixed, a) for k, t, w, a in COLUMNS]
+# key -> (x, width) for each column
+COL = {}
+_x = MARGIN
+for _key, _, _w, _ in COLUMNS:
+    COL[_key] = (_x, _w)
+    _x += _w
 
 # Colours (same palette as the catalogue)
 GOLD = colors.HexColor("#B18A3A")
@@ -109,7 +119,6 @@ MUTED = colors.HexColor("#9B9488")
 LINE = colors.HexColor("#E6DCC8")
 ROW_ALT = colors.HexColor("#FBF8F1")
 HEADER_BG = colors.HexColor("#B18A3A")
-IMAGE_BG = colors.HexColor("#F0EEE9")
 
 # Fonts: TrueType fonts are needed for the rupee sign.
 FONT, FONT_BOLD = "Helvetica", "Helvetica-Bold"
@@ -413,52 +422,58 @@ def draw_table_header(pdf, y):
     pdf.rect(MARGIN, y - HEADER_ROW_H, CONTENT_W, HEADER_ROW_H, stroke=0, fill=1)
     pdf.setFillColor(colors.white)
     x = MARGIN
-    for title, width, align in COLUMNS:
+    for _, title, width, align in COLUMNS:
         draw_text(pdf, title, x, y - HEADER_ROW_H + 7.5, width, align, FONT_BOLD, 9)
         x += width
     return y - HEADER_ROW_H
 
 
 def draw_item_row(pdf, y, index, item):
+    """index is 0-based across all pages; S.No. continues on later pages."""
     y -= ROW_H
     if index % 2:
         pdf.setFillColor(ROW_ALT)
         pdf.rect(MARGIN, y, CONTENT_W, ROW_H, stroke=0, fill=1)
 
-    widths = [w for _, w, _ in COLUMNS]
-    xs = [MARGIN + sum(widths[:i]) for i in range(len(widths))]
     text_y = y + ROW_H / 2 - 3.5
 
-    # Image (or placeholder)
-    img_x = xs[0] + (widths[0] - THUMB) / 2
-    img_y = y + (ROW_H - THUMB) / 2
+    pdf.setFillColor(TEXT_COLOR)
+    _draw_cell(pdf, "sno", str(index + 1), text_y, FONT, 9)
+
+    # Image only when one exists in social_watermarked; otherwise the cell is
+    # left empty (no placeholder) and the row shows the Excel details only.
     if item["image"]:
+        img_col_x, img_col_w = COL["image"]
+        img_x = img_col_x + (img_col_w - THUMB) / 2
+        img_y = y + (ROW_H - THUMB) / 2
         pdf.drawImage(thumbnail(item["image"]), img_x, img_y, THUMB, THUMB)
-    else:
-        pdf.setFillColor(IMAGE_BG)
-        pdf.rect(img_x, img_y, THUMB, THUMB, stroke=0, fill=1)
-        pdf.setFillColor(MUTED)
-        pdf.setFont(FONT, 6)
-        pdf.drawCentredString(img_x + THUMB / 2, img_y + THUMB / 2 - 2, "No image")
 
     pdf.setFillColor(DARK_GOLD)
-    draw_text(pdf, item["id"], xs[1], text_y, widths[1], "left", FONT_BOLD, 9)
+    _draw_cell(pdf, "id", item["id"], text_y, FONT_BOLD, 9)
 
     # Name: up to two lines, vertically centred.
     pdf.setFillColor(TEXT_COLOR)
-    lines = wrap_text(item["name"], FONT, 9, widths[2] - 12)[:2] or [""]
+    lines = wrap_text(item["name"], FONT, 9, COL["name"][1] - 12)[:2] or [""]
     first_y = text_y + (5.5 if len(lines) == 2 else 0)
     for n, line in enumerate(lines):
-        draw_text(pdf, line, xs[2], first_y - n * 11, widths[2], "left", FONT, 9)
+        _draw_cell(pdf, "name", line, first_y - n * 11, FONT, 9)
 
-    draw_text(pdf, str(item["qty"]), xs[3], text_y, widths[3], "right", FONT, 9)
-    draw_text(pdf, money(item["price"]), xs[4], text_y, widths[4], "right", FONT, 9)
-    draw_text(pdf, money(item["amount"]), xs[5], text_y, widths[5], "right", FONT_BOLD, 9)
+    _draw_cell(pdf, "qty", str(item["qty"]), text_y, FONT, 9)
+    _draw_cell(pdf, "price", money(item["price"]), text_y, FONT, 9)
+    _draw_cell(pdf, "amount", money(item["amount"]), text_y, FONT_BOLD, 9)
 
     pdf.setStrokeColor(LINE)
     pdf.setLineWidth(0.5)
     pdf.line(MARGIN, y, PAGE_W - MARGIN, y)
     return y
+
+
+_ALIGN = {key: align for key, _, _, align in COLUMNS}
+
+
+def _draw_cell(pdf, key, text, y, font, size):
+    x, width = COL[key]
+    draw_text(pdf, text, x, y, width, _ALIGN[key], font, size)
 
 
 TOTAL_ROW_H = 28     # final "Total" row
@@ -479,9 +494,12 @@ def discount_label(discount):
 def draw_totals(pdf, y, total_qty, subtotal, discount=None, discount_amount=Decimal(0)):
     """Totals block. With a discount: Subtotal, Discount and the final Total
     (after discount); without: just the Total row."""
-    widths = [w for _, w, _ in COLUMNS]
-    xs = [MARGIN + sum(widths[:i]) for i in range(len(widths))]
-    amount_x, amount_w = xs[4], widths[4] + widths[5]
+    # Labels start at the Item ID column; amounts span Price + Amount columns.
+    label_x = COL["id"][0]
+    label_w = COL["id"][1] + COL["name"][1]
+    qty_x, qty_w = COL["qty"]
+    amount_x = COL["price"][0]
+    amount_w = COL["price"][1] + COL["amount"][1]
 
     if discount:
         for label, value in (("Subtotal", money(subtotal)),
@@ -489,9 +507,9 @@ def draw_totals(pdf, y, total_qty, subtotal, discount=None, discount_amount=Deci
             y -= SUMMARY_ROW_H
             text_y = y + SUMMARY_ROW_H / 2 - 3.5
             pdf.setFillColor(TEXT_COLOR)
-            draw_text(pdf, label, xs[1], text_y, widths[1] + widths[2], "left", FONT, 10)
+            draw_text(pdf, label, label_x, text_y, label_w, "left", FONT, 10)
             if label == "Subtotal":
-                draw_text(pdf, str(total_qty), xs[3], text_y, widths[3], "right", FONT, 10)
+                draw_text(pdf, str(total_qty), qty_x, text_y, qty_w, "right", FONT, 10)
             draw_text(pdf, value, amount_x, text_y, amount_w, "right", FONT, 10)
             pdf.setStrokeColor(LINE)
             pdf.setLineWidth(0.5)
@@ -508,8 +526,8 @@ def draw_totals(pdf, y, total_qty, subtotal, discount=None, discount_amount=Deci
 
     text_y = y + h / 2 - 4
     pdf.setFillColor(DARK_GOLD)
-    draw_text(pdf, "Total", xs[1], text_y, widths[1] + widths[2], "left", FONT_BOLD, 11)
-    draw_text(pdf, str(total_qty), xs[3], text_y, widths[3], "right", FONT_BOLD, 11)
+    draw_text(pdf, "Total", label_x, text_y, label_w, "left", FONT_BOLD, 11)
+    draw_text(pdf, str(total_qty), qty_x, text_y, qty_w, "right", FONT_BOLD, 11)
     draw_text(pdf, money(subtotal - discount_amount), amount_x, text_y, amount_w,
               "right", FONT_BOLD, 11)
     return y
@@ -616,9 +634,11 @@ def build_invoice(customer, items, output=None, bill_date=None, discount=None):
         print(f"Subtotal: {money(subtotal).replace(RUPEE, 'Rs. ')} | {discount_label(discount)}: "
               f"- {money(discount_amount).replace(RUPEE, 'Rs. ')}")
     if unknown:
-        print(f"Warning - IDs not found in {PRODUCTS_FILE.name} (no name): {unknown}")
+        print(f"Note - no name for {unknown}: not in {PRODUCTS_FILE.name}; "
+              f"add a 'Name' column in the order Excel to show one")
     if missing_images:
-        print(f"Warning - no image in {IMAGE_FOLDER.name}: {missing_images}")
+        print(f"Note - no image in {IMAGE_FOLDER.name} for {missing_images} "
+              f"(listed without image)")
     return output
 
 
