@@ -4,7 +4,7 @@ Generate a crystal product catalogue PDF from an Excel sheet and product images.
 Folder setup:
   catalogue_project/
     generate_crystal_catalogue.py
-    products.xlsx
+    products_1.xlsx
     images/
       BR0001.jpg
       BR0002_product.png
@@ -50,7 +50,7 @@ import watermark
 
 # ------------------------- CONFIGURATION -------------------------
 BASE_DIR = Path(__file__).resolve().parent
-EXCEL_FILE = BASE_DIR / "products.xlsx"
+EXCEL_FILE = BASE_DIR / "products_1.xlsx"
 IMAGE_FOLDER = BASE_DIR / "images"
 OUTPUT_PDF = BASE_DIR / "output" / "product_catalog.pdf"
 
@@ -84,9 +84,9 @@ CONTACT_WHATSAPP_MESSAGE = "I would like to enquire about this catalogue!"
 CONTACT_INSTAGRAM = "auravyacrystals"    # handle without @
 CONTACT_FACEBOOK = "auravyacrystals"     # page name from facebook.com/<page>
 
-ID_COLUMN = "ID"
-NAME_COLUMN = "Name"
-COST_COLUMN = "Cost"
+ID_COLUMN = "Item ID"
+NAME_COLUMN = "Item Name"
+COST_COLUMN = "SP"
 
 # Page layout aligned to the supplied 3-column x 6-row template.
 PAGE_W, PAGE_H = A4
